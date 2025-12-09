@@ -11,6 +11,7 @@ app = FastAPI()
 
 DATA_FILE = "tasks_data.json"
 
+
 def load_data():
     try:
         if os.path.exists(DATA_FILE):
@@ -198,6 +199,9 @@ def get_tasks():
         task_with_category = task.copy()
         task_with_category["category"] = category
         
+        # Добавляем поле overdue (просрочено)
+        task_with_category["overdue"] = is_task_overdue(task, today)
+        
         is_completed_today = is_task_completed_today(task, today)
         should_display_today = should_display_task_today(task, today)
         
@@ -266,6 +270,29 @@ def create_generated_task(template, task_date, new_id):
         new_task["time"] = template["time"]
     
     return new_task
+
+def is_task_overdue(task, today):
+    """Проверяет, просрочена ли задача"""
+    if task.get("completed"):
+        return False
+    
+    # Получаем дату задачи
+    task_date_str = task.get("date") or task.get("created_at")
+    if not task_date_str:
+        return False
+    
+    try:
+        task_date = datetime.fromisoformat(task_date_str).date()
+        
+        # Для сгенерированных задач из шаблонов
+        if task.get("original_task_id") is not None:
+            return task_date < today
+        
+        # Для обычных задач
+        return task_date < today
+        
+    except Exception:
+        return False
 
 def is_task_completed_today(task, today):
     """Проверяет, выполнена ли задача сегодня И относится ли она к сегодняшнему дню"""
@@ -609,6 +636,7 @@ def should_task_display_today_after_update(task, today):
 @app.get("/calendar/{date_str}")
 def get_calendar_tasks(date_str: str):
     data = load_data()
+    today = date.today()
     
     try:
         target_date = datetime.fromisoformat(date_str).date()
@@ -642,6 +670,7 @@ def get_calendar_tasks(date_str: str):
             
             task_with_category = task.copy()
             task_with_category["category"] = category
+            task_with_category["overdue"] = task_date < today and not task.get("completed")
             tasks_for_date.append(task_with_category)
     
     tasks_for_date.sort(key=lambda x: (
@@ -651,6 +680,58 @@ def get_calendar_tasks(date_str: str):
     ))
     
     return {"date": date_str, "tasks": tasks_for_date}
+
+def check_task_time_for_notification(task, current_time):
+    """Проверяет, нужно ли отправлять уведомление для задачи"""
+    if not task.get("time") or task.get("completed"):
+        return False
+    
+    try:
+        # Парсим время задачи
+        task_time_str = task["time"]
+        task_hour, task_minute = map(int, task_time_str.split(":"))
+        
+        # Получаем текущее время
+        current_hour = current_time.hour
+        current_minute = current_time.minute
+        
+        # Вычисляем разницу в минутах
+        task_total_minutes = task_hour * 60 + task_minute
+        current_total_minutes = current_hour * 60 + current_minute
+        
+        diff_minutes = task_total_minutes - current_total_minutes
+        
+        # Уведомляем за 30 минут
+        return 28 <= diff_minutes <= 32
+        
+    except (ValueError, KeyError, AttributeError):
+        return False
+
+# Добавьте новый эндпоинт
+@app.get("/notifications/check")
+def check_notifications():
+    """Проверяет задачи для уведомлений"""
+    data = load_data()
+    now = datetime.now()
+    today = now.date()
+    
+    notifications = []
+    
+    for task in data["tasks"]:
+        # Проверяем только активные задачи на сегодня
+        if (should_display_task_today(task, today) and 
+            not task.get("completed") and
+            check_task_time_for_notification(task, now)):
+            
+            notifications.append({
+                "task_id": task["id"],
+                "title": task["title"],
+                "time": task.get("time", ""),
+                "description": task.get("description", ""),
+                "notification_time": now.isoformat()
+            })
+    
+    return {"notifications": notifications}
 
 if __name__ == "__main__":
     import uvicorn

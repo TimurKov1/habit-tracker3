@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import { DndContext, DragOverlay, closestCenter } from '@dnd-kit/core';
 import { SortableContext, arrayMove, rectSortingStrategy } from '@dnd-kit/sortable';
@@ -60,10 +60,283 @@ function App() {
 
   const [taskTime, setTaskTime] = useState('')
 
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [serviceWorkerReady, setServiceWorkerReady] = useState(false);
+  const notificationCheckInterval = useRef(null);
+  const [notificationsHistory, setNotificationsHistory] = useState([]);
+  const swRegistrationRef = useRef(null);
+
   useEffect(() => {
     loadTasks()
     loadCategories()
   }, [])
+
+  useEffect(() => {
+    initializeNotifications();
+    
+    return () => {
+      if (notificationCheckInterval.current) {
+        clearInterval(notificationCheckInterval.current);
+      }
+    };
+  }, []);
+
+  const initializeNotifications = async () => {
+    try {
+      // Проверяем поддержку браузера
+      if (!('Notification' in window)) {
+        console.log('❌ Браузер не поддерживает уведомления')
+        return
+      }
+      
+      // Проверяем текущее разрешение
+      let permission = Notification.permission
+      
+      if (permission === 'default') {
+        // Запрашиваем разрешение
+        permission = await Notification.requestPermission()
+      }
+      
+      if (permission === 'granted') {
+        // Сразу устанавливаем состояние
+        setNotificationsEnabled(true)
+        
+        // Регистрируем Service Worker
+        await registerServiceWorker()
+        
+        // Запускаем проверку уведомлений через 1 секунду (чтобы состояние обновилось)
+        setTimeout(() => {
+          startNotificationChecking()
+        }, 1000)
+      }
+    } catch (error) {
+      console.error('❌ Ошибка инициализации уведомлений:', error)
+    }
+  }
+
+  // Регистрация Service Worker
+  const registerServiceWorker = async () => {
+    try {
+      if (!('serviceWorker' in navigator)) {
+        console.log('❌ Service Worker не поддерживается');
+        return;
+      }
+      
+      const registration = await navigator.serviceWorker.register('/service-worker.js');
+      swRegistrationRef.current = registration;
+    
+      setServiceWorkerReady(true);
+      
+      // Отправляем сообщение Service Worker
+      if (registration.active) {
+        registration.active.postMessage({
+          type: 'INIT',
+          apiBase: API_BASE
+        });
+      }
+      
+      // Ожидаем активации
+      if (registration.waiting) {
+        console.log('🔄 Service Worker ожидает активации');
+        registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+      }
+      
+      // Обновления
+      registration.onupdatefound = () => {
+        const installingWorker = registration.installing;
+        if (installingWorker) {
+          installingWorker.onstatechange = () => {
+            if (installingWorker.state === 'installed') {
+              if (navigator.serviceWorker.controller) {
+                console.log('🔄 Новая версия доступна!');
+                // Показываем пользователю уведомление об обновлении
+                if (window.confirm('Доступна новая версия приложения. Обновить?')) {
+                  registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+                  window.location.reload();
+                }
+              } else {
+                console.log('✅ Приложение готово к оффлайн-работе');
+              }
+            }
+          };
+        }
+      };
+    } catch (error) {
+      console.error('❌ Ошибка регистрации Service Worker:', error);
+    }
+  };
+
+  // Проверка уведомлений каждую минуту
+  const startNotificationChecking = () => {
+    // Очищаем предыдущий интервал
+    if (notificationCheckInterval.current) {
+      clearInterval(notificationCheckInterval.current);
+    }
+    
+    // Запускаем новый интервал
+    notificationCheckInterval.current = setInterval(async () => {
+      await checkTasksForNotifications();
+    }, 60000); // Каждую минуту
+    
+    // Проверяем сразу
+    checkTasksForNotifications();
+  };
+
+  // Проверка задач для уведомлений
+  const checkTasksForNotifications = async () => {
+    try {
+      
+      // Получаем текущее время
+      const now = new Date();
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      const currentTotalMinutes = currentHour * 60 + currentMinute;
+      
+      // Получаем все задачи
+      const response = await axios.get(`${API_BASE}/tasks/`);
+      const { today_active } = response.data;
+      
+      // Проверяем каждую задачу
+      today_active.forEach(task => {
+        if (task.time && !task.completed) {
+          try {
+            // Парсим время задачи
+            const [taskHour, taskMinute] = task.time.split(':').map(Number);
+            const taskTotalMinutes = taskHour * 60 + taskMinute;
+            
+            // Разница в минутах
+            const diffMinutes = taskTotalMinutes - currentTotalMinutes;
+            
+            // Логируем для отладки
+            console.log(`Задача: ${task.title}, время: ${task.time}, разница: ${diffMinutes} мин`);
+            
+            // Если задача через 30 минут (±2 минуты)
+            if (diffMinutes == 30) {
+              console.log(`⏰ Отправляю уведомление для: ${task.title}`);
+              sendBrowserNotification(task);
+            }
+          } catch (error) {
+            console.error('Ошибка парсинга времени:', error);
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Ошибка проверки уведомлений:', error);
+    }
+  };
+
+  // Отправка браузерного уведомления
+  const sendBrowserNotification = (task) => {
+    
+    // Проверяем разрешение НЕ через состояние, а напрямую
+    if (Notification.permission !== 'granted') {
+      console.log('❌ Уведомления не разрешены системой')
+      return
+    }
+    
+    // Дополнительная проверка (опционально)
+    if (!notificationsEnabled) {
+      console.log('⚠️ Уведомления выключены в приложении, но отправлю так как системное разрешение есть')
+    }
+    
+    // Проверяем, не отправляли ли уже уведомление для этой задачи
+    const alreadyNotified = notificationsHistory.some(
+      n => n.taskId === task.id && 
+      new Date() - new Date(n.sentAt) < 60000 // В течение последней минуты
+    );
+    
+    if (alreadyNotified) {
+      console.log(`Уведомление уже отправлено для задачи ${task.id}`);
+      return;
+    }
+    
+    // Создаем уведомление
+    const notification = new Notification('⏰ Напоминание о задаче', {
+      body: `Через 30 минут: "${task.title}"`,
+      icon: '/vite.svg',
+      tag: `task-reminder-${task.id}`,
+      requireInteraction: true,
+      silent: false
+    });
+    
+    console.log(`✅ Уведомление отправлено: ${task.title}`);
+    
+    // Сохраняем в историю
+    const notificationRecord = {
+      id: Date.now(),
+      taskId: task.id,
+      taskTitle: task.title,
+      taskTime: task.time,
+      sentAt: new Date().toISOString()
+    };
+    
+    setNotificationsHistory(prev => [...prev, notificationRecord]);
+    
+    // Ограничиваем историю 50 записями
+    if (notificationsHistory.length > 50) {
+      setNotificationsHistory(prev => prev.slice(-50));
+    }
+    
+    // Обработка клика по уведомлению
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+      
+      // Можно добавить скролл к задаче
+      console.log(`Переход к задаче: ${task.id}`);
+    };
+    
+    // Автоматически закрываем через 30 секунд
+    setTimeout(() => {
+      notification.close();
+    }, 30000);
+  };
+
+  // Тестовое уведомление
+  const testNotification = () => {
+    if (!notificationsEnabled) {
+      alert('Пожалуйста, разрешите уведомления в браузере');
+      return;
+    }
+    
+    const testTask = {
+      id: 'test',
+      title: 'Тестовая задача',
+      time: '12:00',
+      completed: false
+    };
+    
+    sendBrowserNotification(testTask);
+    
+    // Также показываем сообщение
+    alert('Тестовое уведомление отправлено! Проверьте панель уведомлений браузера.');
+  };
+
+  // Переключение уведомлений
+  const toggleNotifications = async () => {
+    if (!('Notification' in window)) {
+      alert('Ваш браузер не поддерживает уведомления');
+      return;
+    }
+    
+    if (Notification.permission === 'denied') {
+      alert('Вы заблокировали уведомления. Разрешите их в настройках браузера.');
+      return;
+    }
+    
+    if (Notification.permission !== 'granted') {
+      const permission = await Notification.requestPermission();
+      if (permission === 'granted') {
+        setNotificationsEnabled(true);
+        await registerServiceWorker();
+        startNotificationChecking();
+        alert('✅ Уведомления включены!');
+      }
+    } else {
+      setNotificationsEnabled(!notificationsEnabled);
+      alert(notificationsEnabled ? '🔕 Уведомления выключены' : '🔔 Уведомления включены');
+    }
+  };
 
   const refreshAllData = async () => {
     await loadTasks()
@@ -237,6 +510,21 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+      <div className="fixed top-4 right-4 z-50">
+        <div className="flex gap-2">
+          <button
+            onClick={toggleNotifications}
+            className={`p-3 rounded-full shadow-lg flex items-center justify-center ${
+              notificationsEnabled 
+                ? 'bg-green-500 hover:bg-green-600' 
+                : 'bg-red-500 hover:bg-red-600'
+            } text-white transition-colors`}
+            title={notificationsEnabled ? 'Отключить уведомления' : 'Включить уведомления'}
+          >
+            {notificationsEnabled ? '🔔' : '🔕'}
+          </button>
+        </div>
+      </div>
       <div className="max-w-6xl mx-auto px-4 py-8">
         <header className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-800 dark:text-white mb-2">
@@ -603,35 +891,70 @@ const TaskCard = ({ task, categories, onComplete, onDelete, getPriorityColor, fo
 
   const priorityClasses = getPriorityClasses(task.priority)
   const isVirtual = task.id && String(task.id).startsWith('template_')
+  
+  // Проверяем, просрочена ли задача
+  const isOverdue = task.overdue;
 
   return (
-    <div className="flex items-center justify-between p-4 border-2 border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 hover:shadow-md transition-all">
+    <div className={`flex items-center justify-between p-4 border-2 rounded-lg transition-all ${
+      isOverdue 
+        ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900 animate-pulse shadow-md' 
+        : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:shadow-md'
+    }`}>
       <div className="flex items-center gap-3 flex-1">
         {task.time && (
-              <span className="text-md font-medium bg-green-100 dark:bg-green-800 text-green-800 dark:text-green-200 px-2 py-1 rounded">
-                ⏰ {task.time}
-              </span>
+          <span className={`text-md font-medium px-2 py-1 rounded ${
+            isOverdue 
+              ? 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200' 
+              : 'bg-green-100 dark:bg-green-800 text-green-800 dark:text-green-200'
+          }`}>
+            ⏰ {task.time}
+          </span>
         )}
+        
+        {/* Бейдж просрочено */}
+        {isOverdue && (
+          <span className="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200 font-medium animate-pulse">
+            ⚠️ ПРОСРОЧЕНО
+          </span>
+        )}
+        
         <div className="flex-1">
           <div className="flex items-start mb-1">
-            <h3 className="font-semibold dark:text-white text-lg opacity-75">
+            <h3 className={`font-semibold text-lg ${
+              isOverdue 
+                ? 'text-red-700 dark:text-red-300 line-through' 
+                : 'dark:text-white opacity-75'
+            }`}>
               {task.title}
             </h3>
           </div>
+          
           {task.description && (
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">
+            <p className={`text-sm mb-1 ${
+              isOverdue 
+                ? 'text-red-600 dark:text-red-400' 
+                : 'text-gray-600 dark:text-gray-400'
+            }`}>
               {task.description}
             </p>
           )}
+          
           <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-xs px-2 py-1 rounded-full font-medium ${priorityClasses.badge}`}>
               {task.priority === 'high' ? 'Высокий' : task.priority === 'medium' ? 'Средний' : 'Низкий'} приоритет
             </span>
+            
             {task.estimated_time > 0 && (
-              <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300 font-medium">
+              <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                isOverdue 
+                  ? 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200' 
+                  : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+              }`}>
                 ⏱️ {formatTime(task.estimated_time)}
               </span>
             )}
+            
             {task.category && (
               <span 
                 className="text-xs px-2 py-1 rounded-full font-medium"
@@ -643,6 +966,13 @@ const TaskCard = ({ task, categories, onComplete, onDelete, getPriorityColor, fo
                 {task.category.icon} {task.category.name}
               </span>
             )}
+            
+            {/* Дата выполнения для просроченных задач */}
+            {isOverdue && task.date && (
+              <span className="text-xs px-2 py-1 rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 font-medium">
+                📅 {new Date(task.date).toLocaleDateString('ru-RU')}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -650,9 +980,13 @@ const TaskCard = ({ task, categories, onComplete, onDelete, getPriorityColor, fo
       <div className="flex gap-2">
         <button 
           onClick={onComplete}
-          className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg font-semibold transition-colors"
+          className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+            isOverdue 
+              ? 'bg-red-500 hover:bg-red-600 text-white' 
+              : 'bg-green-500 hover:bg-green-600 text-white'
+          }`}
         >
-          ✓ Выполнено
+          {isOverdue ? '✓ Отметить' : '✓ Выполнено'}
         </button>
         <button 
           onClick={onDelete}
@@ -1041,6 +1375,8 @@ const TaskCalendar = ({ tasks, categories, onComplete, onDelete, getPriorityColo
       }
     })
     
+    const isOverdue = task.overdue;
+    
     const style = {
       transform: CSS.Transform.toString(transform),
       opacity: isDragging ? 0.5 : 1,
@@ -1056,11 +1392,16 @@ const TaskCalendar = ({ tasks, categories, onComplete, onDelete, getPriorityColo
         className={`text-xs p-1 rounded truncate ${
           task.completed 
             ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200' 
-            : 'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-200'
+            : isOverdue
+              ? 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200 animate-pulse'
+              : 'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-200'
         } ${isDragging ? 'shadow-lg' : ''}`}
         title={task.title}
       >
-        <span className='font-bold'>{task.time}</span> | <span className={`${task.completed ? 'line-through' : ''}`}>{task.title}</span>
+        <span className='font-bold'>{task.time}</span> | <span className={`${task.completed || isOverdue ? 'line-through' : ''}`}>
+          {task.title}
+          {isOverdue && ' ⚠️'}
+        </span>
       </div>
     )
   }
@@ -1261,6 +1602,7 @@ const CalendarTaskCard = ({ task, onComplete, onDelete, getPriorityColor, format
   const isCompleted = task.completed
   const isVirtual = task.is_virtual
   const isTemplateBased = task.is_template_based
+  const isOverdue = task.overdue
 
   const getPriorityBadgeClasses = (priority) => {
     switch (priority) {
@@ -1292,32 +1634,44 @@ const CalendarTaskCard = ({ task, onComplete, onDelete, getPriorityColor, format
     <div className={`flex items-center justify-between p-3 border rounded-lg ${
       isCompleted 
         ? 'bg-green-50 dark:bg-green-900 border-green-200 dark:border-green-800' 
-        : isVirtual
-          ? 'bg-purple-50 dark:bg-purple-900 border-purple-200 dark:border-purple-800'
-          : ' dark:bg-blue-900 border-gray-200 dark:border-blue-700'
+        : isOverdue
+          ? 'bg-red-50 dark:bg-red-900 border-red-300 dark:border-red-700 animate-pulse'
+          : isVirtual
+            ? 'bg-purple-50 dark:bg-purple-900 border-purple-200 dark:border-purple-800'
+            : ' dark:bg-blue-900 border-gray-200 dark:border-blue-700'
     }`}>
       <div className="flex items-center gap-3 flex-1">
 
         {task.time && (
-              <span className={`text-md font-medium px-2 py-1 rounded ${
-                isCompleted 
-                  ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200' 
-                  : isVirtual
-                    ? 'bg-purple-100 text-purple-800 dark:bg-purple-800 dark:text-purple-200'
-                    : 'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-200'
-              }`}>
-                ⏰ {task.time}
-              </span>
-            )}
+          <span className={`text-md font-medium px-2 py-1 rounded ${
+            isCompleted 
+              ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-200' 
+              : isOverdue
+                ? 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200'
+                : isVirtual
+                  ? 'bg-purple-100 text-purple-800 dark:bg-purple-800 dark:text-purple-200'
+                  : 'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-200'
+          }`}>
+            ⏰ {task.time}
+          </span>
+        )}
+        
+        {isOverdue && (
+          <span className="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-200 font-medium">
+            ⚠️ ПРОСРОЧЕНО
+          </span>
+        )}
         
         <div className="flex-1">
           <div className="flex justify-between items-start mb-1">
             <h3 className={`font-semibold text-sm ${
               isCompleted 
                 ? 'line-through text-green-800 dark:text-green-200' 
-                : isVirtual
-                  ? 'text-purple-800 dark:text-purple-200'
-                  : 'text-gray-800 dark:text-blue-200'
+                : isOverdue
+                  ? 'text-red-800 dark:text-red-300 line-through'
+                  : isVirtual
+                    ? 'text-purple-800 dark:text-purple-200'
+                    : 'text-gray-800 dark:text-blue-200'
             }`}>
               {task.title}
               {isVirtual && <span className="text-xs ml-1 opacity-75">(виртуальная)</span>}
@@ -1329,9 +1683,11 @@ const CalendarTaskCard = ({ task, onComplete, onDelete, getPriorityColor, format
             <p className={`text-xs mb-1 ${
               isCompleted 
                 ? 'text-green-600 dark:text-green-400' 
-                : isVirtual
-                  ? 'text-purple-600 dark:text-purple-400'
-                  : 'text-blue-600 dark:text-blue-400'
+                : isOverdue
+                  ? 'text-red-600 dark:text-red-400'
+                  : isVirtual
+                    ? 'text-purple-600 dark:text-purple-400'
+                    : 'text-blue-600 dark:text-blue-400'
             }`}>
               {task.description}
             </p>
@@ -1370,9 +1726,13 @@ const CalendarTaskCard = ({ task, onComplete, onDelete, getPriorityColor, format
         {!isCompleted && (
           <button 
             onClick={onComplete}
-            className="bg-green-500 hover:bg-green-600 text-white p-2 rounded transition-colors"
+            className={`p-2 rounded transition-colors ${
+              isOverdue 
+                ? 'bg-red-500 hover:bg-red-600 text-white' 
+                : 'bg-green-500 hover:bg-green-600 text-white'
+            }`}
           >
-            ✓
+            {isOverdue ? '✓' : '✓'}
           </button>
         )}
         <button 
