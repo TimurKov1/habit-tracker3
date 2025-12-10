@@ -1,5 +1,5 @@
 // frontend/public/service-worker.js
-const API_BASE = 'http://localhost:8001';
+const API_BASE = 'timurkov.pythonanywhere.com';
 
 // Устанавливаем Service Worker
 self.addEventListener('install', (event) => {

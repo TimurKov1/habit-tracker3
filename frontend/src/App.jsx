@@ -6,7 +6,7 @@ import { useDroppable, useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 
 
-const API_BASE = 'http://localhost:8001'
+const API_BASE = 'https://timurkov.pythonanywhere.com'
 
 const getRepeatLabel = (interval, days) => {
   if (!interval || interval === 'none') return ''
