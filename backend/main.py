@@ -6,6 +6,8 @@ import json
 import os
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import uvicorn
+import numpy
 
 app = FastAPI()
 
@@ -45,7 +47,12 @@ def save_data(data):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://TimurKov1.github.io",  # Ваш GitHub Pages
+        "https://*.pythonanywhere.com"     # Для отладки
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -145,7 +152,7 @@ def create_task(task: TaskCreate):
             task_date = today
     
     new_task = {
-        "id": len(data["tasks"]) + 1,
+        "id": numpy.random.randint(30, 1000000),
         "title": task.title,
         "description": task.description,
         "category_id": category_id,
@@ -734,5 +741,5 @@ def check_notifications():
     return {"notifications": notifications}
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    port = int(os.environ.get("PORT", 8001))
+    uvicorn.run(app, host="0.0.0.0", port=port)
