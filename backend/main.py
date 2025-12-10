@@ -7,7 +7,6 @@ import os
 from typing import Optional, List, Dict, Any
 from enum import Enum
 import uvicorn
-import numpy
 
 app = FastAPI()
 
@@ -152,7 +151,7 @@ def create_task(task: TaskCreate):
             task_date = today
     
     new_task = {
-        "id": numpy.random.randint(30, 1000000),
+        "id": int(datetime.now().timestamp()),
         "title": task.title,
         "description": task.description,
         "category_id": category_id,
